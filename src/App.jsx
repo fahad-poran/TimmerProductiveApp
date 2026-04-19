@@ -192,7 +192,7 @@ const fetchTasks = async () => {
         <div className="brand">
           <div>
             <h1>Timer Manager</h1>
-            <p className="subtitle">Add tasks, run timers, pause, resume, and watch success rate rise.</p>
+            <p className="subtitle">+ Add tasks, run timers, pause, resume, and watch success rate rise.</p>
           </div>
         </div>
         <div className="sign-in-box">
