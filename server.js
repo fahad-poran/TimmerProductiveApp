@@ -140,3 +140,5 @@ app.post('/api/tasks', async (req, res) => {
 app.listen(port, () => {
   console.log(`Timer Manager backend listening at http://localhost:${port}`);
 });
+
+module.exports = app;
