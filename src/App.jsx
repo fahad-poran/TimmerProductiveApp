@@ -41,8 +41,10 @@ export default function App() {
     );
   }
 
-  fetchTasks();
-  fetchStats();
+  if (user) {
+    fetchTasks();
+    fetchStats();
+  }
 }, [user]);
 
   useEffect(() => {
@@ -66,19 +68,26 @@ export default function App() {
     return () => window.clearInterval(clockInterval);
   }, []);
 
-  const fetchTasks = async () => {
-    try {
-      const res = await fetch('/api/tasks');
-      const json = await res.json();
-      setTasks(json);
-    } catch (error) {
-      console.error(error);
-    }
-  };
+const fetchTasks = async () => {
+  if (!user?.email) return; // ⛔ don't call API without user
+
+  try {
+    const res = await fetch(`/api/tasks?userEmail=${user.email}`);
+    const json = await res.json();
+
+    // 🛡️ safety check
+    setTasks(Array.isArray(json) ? json : []);
+  } catch (error) {
+    console.error(error);
+    setTasks([]); // fallback
+  }
+};
 
   const fetchStats = async () => {
+    if (!user?.email) return; // ⛔ don't call API without user
+
     try {
-      const res = await fetch('/api/stats');
+      const res = await fetch(`/api/stats?userEmail=${user.email}`);
       const json = await res.json();
       setStats(json);
     } catch (error) {
@@ -125,6 +134,7 @@ export default function App() {
       duration: activeTask.duration,
       status: result,
       completedAt: new Date().toISOString(),
+      userEmail: user?.email,
     };
 
     try {
@@ -276,7 +286,7 @@ export default function App() {
         <section className="card task-card">
           <h2 className="section-title">Recent Tasks</h2>
           <div className="task-list">
-            {tasks.length === 0 ? (
+            {!Array.isArray(tasks) || tasks.length === 0 ? (
               <p className="feedback">No tasks saved yet — create one and complete a session.</p>
             ) : (
               tasks.map((task) => (
