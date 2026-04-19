@@ -7,8 +7,21 @@ import { createClient } from '@supabase/supabase-js';
 dotenv.config();
 const app = express();
 const port = process.env.PORT || 4000;
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://timmer-productive-app.vercel.app'
+];
 
-app.use(cors({ origin: 'http://localhost:3000', credentials: true }));
+app.use(cors({
+  origin: function(origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 // Initialize Supabase
@@ -59,7 +72,7 @@ app.get('/api/tasks', async (req, res) => {
 
     console.log('Data found:', data);
     console.log('Number of tasks:', data?.length || 0);
-    
+
     res.json(data);
   } catch (error) {
     console.error('Error fetching tasks:', error);
