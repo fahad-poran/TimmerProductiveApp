@@ -11,44 +11,83 @@ const formatTime = (seconds) => {
   return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 };
 
+const CACHE_KEY = 'timerAppCache';
+const SYNC_QUEUE_KEY = 'timerAppSyncQueue';
+const CATEGORIES = ['General', 'Work', 'Study', 'Exercise', 'Creative', 'Personal'];
+
+const useLocalStorage = (key, initialValue) => {
+  const [storedValue, setStoredValue] = useState(() => {
+    try {
+      const item = window.localStorage.getItem(key);
+      return item ? JSON.parse(item) : initialValue;
+    } catch (error) {
+      console.error(error);
+      return initialValue;
+    }
+  });
+
+  const setValue = (value) => {
+    try {
+      setStoredValue(value);
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  return [storedValue, setValue];
+};
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [taskName, setTaskName] = useState('Write app flow');
   const [taskMinutes, setTaskMinutes] = useState(25);
+  const [taskCategory, setTaskCategory] = useState('General');
   const [activeTask, setActiveTask] = useState(null);
   const [timerSec, setTimerSec] = useState(0);
   const [status, setStatus] = useState('idle');
+  const [distractionCount, setDistractionCount] = useState(0);
   const [tasks, setTasks] = useState([]);
-  const [stats, setStats] = useState({ success: 0, stopped: 0 });
+  const [stats, setStats] = useState({ success: 0, stopped: 0, focusScore: 0, streak: 0, categoryBreakdown: {} });
   const [clockTime, setClockTime] = useState(new Date());
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [pomodoroAlert, setPomodoroAlert] = useState('');
+  const [syncQueue, setSyncQueue] = useLocalStorage(SYNC_QUEUE_KEY, []);
+  const [offlineMode, setOfflineMode] = useState(false);
   const intervalRef = useRef(null);
 
   useEffect(() => {
-  if (window.google && !user) {
-    window.google.accounts.id.initialize({
-      client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-      callback: handleCredentialResponse,
-    });
+    if (window.google && !user) {
+      window.google.accounts.id.initialize({
+        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+        callback: handleCredentialResponse,
+      });
 
-    window.google.accounts.id.renderButton(
-      document.getElementById('google-button'),
-      {
-        theme: 'outline',
-        size: 'large',
-        shape: 'pill',
-        text: 'signin_with'
-      }
-    );
-  }
+      window.google.accounts.id.renderButton(
+        document.getElementById('google-button'),
+        { theme: 'outline', size: 'large', shape: 'pill', text: 'signin_with' }
+      );
+    }
 
-  if (user) {
-    fetchTasks();
-    fetchStats();
-  }
-}, [user]);
+    if (user) {
+      fetchTasks();
+      fetchStats();
+      syncOfflineQueue();
+    }
+  }, [user]);
 
   useEffect(() => {
     if (status === 'running' && timerSec > 0) {
+      const baseTime = taskMinutes * 60;
+      const remaining = timerSec;
+
+      // Pomodoro: alert when last 60 sec of a 25-min session
+      if (taskMinutes === 25 && remaining < 60 && remaining > 0) {
+        setPomodoroAlert('🎯 Pomodoro done! Take a 5-min break.');
+      } else if (remaining >= baseTime - 1) {
+        setPomodoroAlert('');
+      }
+
       intervalRef.current = window.setInterval(() => {
         setTimerSec((current) => {
           if (current <= 1) {
@@ -61,7 +100,7 @@ export default function App() {
       }, 1000);
     }
     return () => window.clearInterval(intervalRef.current);
-  }, [status, timerSec]);
+  }, [status, timerSec, taskMinutes]);
 
   useEffect(() => {
     const clockInterval = window.setInterval(() => setClockTime(new Date()), 1000);
@@ -69,31 +108,53 @@ export default function App() {
   }, []);
 
 const fetchTasks = async () => {
-  if (!user?.email) return; // ⛔ don't call API without user
+  if (!user?.email) return;
 
   try {
-    const res = await fetch(`/api/tasks?userEmail=${user.email}`);
+    const res = await fetch(`/api/tasks?userEmail=${user.email}&category=${selectedCategory === 'All' ? '' : selectedCategory}`);
     const json = await res.json();
-
-    // 🛡️ safety check
     setTasks(Array.isArray(json) ? json : []);
+    window.localStorage.setItem(CACHE_KEY, JSON.stringify(json));
   } catch (error) {
-    console.error(error);
-    setTasks([]); // fallback
+    console.warn('Offline mode: loading from cache', error);
+    const cached = window.localStorage.getItem(CACHE_KEY);
+    setTasks(cached ? JSON.parse(cached) : []);
+    setOfflineMode(true);
   }
 };
 
-  const fetchStats = async () => {
-    if (!user?.email) return; // ⛔ don't call API without user
+const fetchStats = async () => {
+  if (!user?.email) return;
 
+  try {
+    const res = await fetch(`/api/stats?userEmail=${user.email}&category=${selectedCategory === 'All' ? '' : selectedCategory}`);
+    const json = await res.json();
+    setStats(json);
+  } catch (error) {
+    console.warn('Unable to fetch stats:', error);
+  }
+};
+
+const syncOfflineQueue = async () => {
+  if (syncQueue.length === 0) return;
+
+  for (const task of syncQueue) {
     try {
-      const res = await fetch(`/api/stats?userEmail=${user.email}`);
-      const json = await res.json();
-      setStats(json);
+      await fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(task),
+      });
     } catch (error) {
-      console.error(error);
+      console.error('Sync failed for task:', task, error);
+      return; // stop if sync fails
     }
-  };
+  }
+  setSyncQueue([]);
+  setOfflineMode(false);
+  fetchTasks();
+  fetchStats();
+};
 
   const handleCredentialResponse = async (response) => {
     if (!response?.credential) return;
@@ -118,9 +179,10 @@ const fetchTasks = async () => {
   const startTask = () => {
     if (!taskName.trim()) return;
     const duration = taskMinutes * 60;
-    setActiveTask({ name: taskName.trim(), duration, status: 'running' });
+    setActiveTask({ name: taskName.trim(), duration, status: 'running', category: taskCategory });
     setTimerSec(duration);
     setStatus('running');
+    setDistractionCount(0);
     setTaskName('');
     setTaskMinutes(25);
   };
@@ -135,6 +197,8 @@ const fetchTasks = async () => {
       status: result,
       completedAt: new Date().toISOString(),
       userEmail: user?.email,
+      category: activeTask.category,
+      distractionCount
     };
 
     try {
@@ -146,7 +210,8 @@ const fetchTasks = async () => {
       fetchTasks();
       fetchStats();
     } catch (error) {
-      console.error(error);
+      console.warn('Saving to offline queue', error);
+      setSyncQueue([...syncQueue, payload]);
     }
     setActiveTask(null);
   };
@@ -219,6 +284,11 @@ const fetchTasks = async () => {
               onChange={(e) => setTaskName(e.target.value)}
               placeholder="Describe your next task"
             />
+            <select value={taskCategory} onChange={(e) => setTaskCategory(e.target.value)}>
+              {CATEGORIES.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
+            </select>
+          </div>
+          <div className="control-row">
             <input
               type="number"
               min="1"
@@ -226,11 +296,11 @@ const fetchTasks = async () => {
               value={taskMinutes}
               onChange={(e) => setTaskMinutes(Number(e.target.value))}
             />
-          </div>
-          <div className="control-row">
             <button onClick={startTask}>Start Timer</button>
-            <button className="small-button" onClick={() => setTaskMinutes(25)}>Reset 25m</button>
           </div>
+
+          {pomodoroAlert && <div style={{ padding: '12px', background: '#ffd700', borderRadius: '12px', marginBottom: '12px', color: '#000' }}>{pomodoroAlert}</div>}
+          {offlineMode && <div style={{ padding: '12px', background: '#ff9800', borderRadius: '12px', marginBottom: '12px', color: '#fff' }}>📡 Offline mode - changes will sync when online</div>}
 
           <div className="clock-panel">
             <div className="clock-card card">
@@ -253,8 +323,8 @@ const fetchTasks = async () => {
                 <dl>
                   <dt>Remaining</dt>
                   <dd>{activeTask ? formatTime(timerSec) : '00:00'}</dd>
-                  <dt>State</dt>
-                  <dd>{status === 'running' ? 'Running' : status === 'paused' ? 'Paused' : status === 'finished' ? 'Finished' : 'Idle'}</dd>
+                  <dt>Distractions</dt>
+                  <dd>{distractionCount}</dd>
                 </dl>
               </div>
               <div className="timer-progress">
@@ -262,6 +332,7 @@ const fetchTasks = async () => {
               </div>
               <div className="control-row" style={{ marginTop: '20px' }}>
                 <button onClick={pauseOrResume} disabled={!activeTask}>{status === 'paused' ? 'Resume' : 'Pause'}</button>
+                <button className="small-button" onClick={() => { if (activeTask) setDistractionCount(d => d + 1); }}>😵 Distraction</button>
                 <button className="small-button" onClick={stopTask} disabled={!activeTask}>Stop</button>
               </div>
             </div>
@@ -269,16 +340,22 @@ const fetchTasks = async () => {
         </section>
 
         <section className="card chart-card">
-          <h2 className="section-title">Success vs Stop Rate</h2>
+          <h2 className="section-title">Analytics</h2>
+          <div style={{ marginBottom: '16px' }}>
+            <select value={selectedCategory} onChange={(e) => { setSelectedCategory(e.target.value); fetchStats(); }}>
+              <option value="All">All Categories</option>
+              {CATEGORIES.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
+            </select>
+          </div>
           <Bar data={chartData} options={{ responsive: true, plugins: { legend: { display: false } } }} />
           <div className="stats-row">
             <div className="stat-box">
-              <strong>{stats.success}</strong>
-              Completed
+              <strong>{stats.focusScore}%</strong>
+              Focus Score
             </div>
             <div className="stat-box">
-              <strong>{stats.stopped}</strong>
-              Stopped
+              <strong>{stats.streak}</strong>
+              Day Streak
             </div>
           </div>
         </section>
@@ -293,8 +370,9 @@ const fetchTasks = async () => {
                 <div key={task.id} className={`task-item ${task.status === 'success' ? 'success' : task.status === 'stopped' ? 'stopped' : ''}`}>
                   <strong>{task.name}</strong>
                   <div className="task-meta">
+                    <span>{task.category}</span>
                     <span>{formatTime(task.duration)}</span>
-                    <span>{task.status === 'success' ? 'Success' : task.status === 'stopped' ? 'Stopped' : 'Pending'}</span>
+                    <span>{task.status === 'success' ? '✓' : task.status === 'stopped' ? '✗' : '◯'}</span>
                   </div>
                 </div>
               ))
