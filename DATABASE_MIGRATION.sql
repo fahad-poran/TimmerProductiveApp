@@ -4,6 +4,7 @@
 -- Add new columns to tasks table if they don't exist
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS category VARCHAR(255) DEFAULT 'General';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS distractioncount INTEGER DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS distractiontype VARCHAR(50) DEFAULT 'manual';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS focusdata JSONB DEFAULT NULL;
 
 -- Create indexes for better query performance

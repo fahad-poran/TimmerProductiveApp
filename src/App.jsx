@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bar, Line } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, LineElement, PointElement, Tooltip, Legend } from 'chart.js';
 import jwtDecode from 'jwt-decode';
@@ -27,11 +27,112 @@ export default function App() {
   const [weeklyStats, setWeeklyStats] = useState(null);
   const [heatmapData, setHeatmapData] = useState(null);
   const [clockTime, setClockTime] = useState(new Date());
+  const [distractionType, setDistractionType] = useState('manual');
   const [distractionCount, setDistractionCount] = useState(0);
   const [showBreakSuggestion, setShowBreakSuggestion] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
   const [viewMode, setViewMode] = useState('dashboard'); // 'dashboard', 'weekly', 'heatmap'
   const intervalRef = useRef(null);
+  const initialLoadRef = useRef({});
+  const isSavingRef = useRef(false);
+  const [fetchErrors, setFetchErrors] = useState({});
+
+  // Define all helper functions before useEffect to avoid initialization errors
+  const loadFromCache = useCallback(() => {
+    try {
+      const cached = localStorage.getItem(STORAGE_KEY);
+      if (cached) {
+        setTasks(JSON.parse(cached));
+      }
+    } catch (error) {
+      console.error('Cache load error:', error);
+    }
+  }, []);
+
+  const syncQueue = useCallback(async () => {
+    try {
+      const queue = JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY) || '[]');
+      if (queue.length === 0) return;
+
+      for (const item of queue) {
+        try {
+          await fetch('/api/tasks', {
+            method: item.method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(item.body),
+          });
+        } catch (error) {
+          console.error('Sync error:', error);
+          break;
+        }
+      }
+      localStorage.removeItem(SYNC_QUEUE_KEY);
+    } catch (error) {
+      console.error('Queue sync error:', error);
+    }
+  }, []);
+
+  const fetchTasks = useCallback(async () => {
+    if (!user?.email) return;
+
+    try {
+      const res = await fetch(`/api/tasks?userEmail=${user.email}`);
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      
+      const json = await res.json();
+      const taskData = Array.isArray(json) ? json : [];
+      setTasks(taskData);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(taskData));
+    } catch (error) {
+      console.error('Fetch tasks error:', error);
+      if (isOffline) {
+        const cached = localStorage.getItem(STORAGE_KEY);
+        if (cached) setTasks(JSON.parse(cached));
+      }
+    }
+  }, [user?.email, isOffline]);
+
+  const fetchStats = useCallback(async () => {
+    if (!user?.email) return;
+
+    try {
+      const res = await fetch(`/api/stats?userEmail=${user.email}`);
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      
+      const json = await res.json();
+      setStats(json);
+    } catch (error) {
+      console.error('Fetch stats error:', error);
+    }
+  }, [user?.email]);
+
+  const fetchWeeklyStats = useCallback(async () => {
+    if (!user?.email) return;
+
+    try {
+      const res = await fetch(`/api/weekly?userEmail=${user.email}`);
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      
+      const json = await res.json();
+      setWeeklyStats(json);
+    } catch (error) {
+      console.error('Fetch weekly error:', error);
+    }
+  }, [user?.email]);
+
+  const fetchHeatmapData = useCallback(async () => {
+    if (!user?.email) return;
+
+    try {
+      const res = await fetch(`/api/heatmap?userEmail=${user.email}&days=30`);
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      
+      const json = await res.json();
+      setHeatmapData(json);
+    } catch (error) {
+      console.error('Fetch heatmap error:', error);
+    }
+  }, [user?.email]);
 
   useEffect(() => {
     // Handle online/offline
@@ -40,7 +141,18 @@ export default function App() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    if (window.google && !user) {
+    // Restore user from localStorage (runs once on mount)
+    const savedUser = localStorage.getItem('timerapp_user');
+    if (savedUser) {
+      try {
+        setUser(JSON.parse(savedUser));
+      } catch (error) {
+        console.error('Error restoring user:', error);
+        localStorage.removeItem('timerapp_user');
+      }
+    }
+
+    if (window.google) {
       window.google.accounts.id.initialize({
         client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
         callback: handleCredentialResponse,
@@ -57,7 +169,16 @@ export default function App() {
       );
     }
 
-    if (user) {
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Load initial data when user logs in (prevents infinite loop)
+  useEffect(() => {
+    if (user?.email && !initialLoadRef.current[user.email]) {
+      initialLoadRef.current[user.email] = true;
       loadFromCache();
       syncQueue();
       fetchTasks();
@@ -65,12 +186,7 @@ export default function App() {
       fetchWeeklyStats();
       fetchHeatmapData();
     }
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [user]);
+  }, [user?.email, loadFromCache, syncQueue, fetchTasks, fetchStats, fetchWeeklyStats, fetchHeatmapData]);
 
   useEffect(() => {
     if (status === 'running' && timerSec > 0) {
@@ -97,94 +213,6 @@ export default function App() {
     return () => window.clearInterval(clockInterval);
   }, []);
 
-  const loadFromCache = () => {
-    try {
-      const cached = localStorage.getItem(STORAGE_KEY);
-      if (cached) {
-        setTasks(JSON.parse(cached));
-      }
-    } catch (error) {
-      console.error('Cache load error:', error);
-    }
-  };
-
-  const syncQueue = async () => {
-    try {
-      const queue = JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY) || '[]');
-      if (queue.length === 0) return;
-
-      for (const item of queue) {
-        try {
-          await fetch('/api/tasks', {
-            method: item.method,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(item.body),
-          });
-        } catch (error) {
-          console.error('Sync error:', error);
-          break;
-        }
-      }
-      localStorage.removeItem(SYNC_QUEUE_KEY);
-    } catch (error) {
-      console.error('Queue sync error:', error);
-    }
-  };
-
-  const fetchTasks = async () => {
-    if (!user?.email) return;
-
-    try {
-      const res = await fetch(`/api/tasks?userEmail=${user.email}`);
-      const json = await res.json();
-      const taskData = Array.isArray(json) ? json : [];
-      setTasks(taskData);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(taskData));
-    } catch (error) {
-      console.error('Fetch tasks error:', error);
-      if (isOffline) {
-        const cached = localStorage.getItem(STORAGE_KEY);
-        if (cached) setTasks(JSON.parse(cached));
-      }
-    }
-  };
-
-  const fetchStats = async () => {
-    if (!user?.email) return;
-
-    try {
-      const res = await fetch(`/api/stats?userEmail=${user.email}`);
-      const json = await res.json();
-      setStats(json);
-    } catch (error) {
-      console.error('Fetch stats error:', error);
-    }
-  };
-
-  const fetchWeeklyStats = async () => {
-    if (!user?.email) return;
-
-    try {
-      const res = await fetch(`/api/weekly?userEmail=${user.email}`);
-      const json = await res.json();
-      setWeeklyStats(json);
-    } catch (error) {
-      console.error('Fetch weekly error:', error);
-    }
-  };
-
-  const fetchHeatmapData = async () => {
-    if (!user?.email) return;
-
-    try {
-      const res = await fetch(`/api/heatmap?userEmail=${user.email}&days=30`);
-      const json = await res.json();
-      setHeatmapData(json);
-    } catch (error) {
-      console.error('Fetch heatmap error:', error);
-    }
-  };
-
   const handleCredentialResponse = async (response) => {
     if (!response?.credential) return;
     const decoded = jwtDecode(response.credential);
@@ -197,6 +225,7 @@ export default function App() {
       locale: decoded.locale,
     };
     setUser(signedInUser);
+    localStorage.setItem('timerapp_user', JSON.stringify(signedInUser)); // Persist user
     try {
       await fetch('/api/auth/google', {
         method: 'POST',
@@ -211,18 +240,22 @@ export default function App() {
   const startTask = () => {
     if (!taskName.trim()) return;
     const duration = taskMinutes * 60;
-    setActiveTask({ name: taskName.trim(), duration, status: 'running', category: taskCategory });
+    setActiveTask({ name: taskName.trim(), duration, status: 'running', category: taskCategory, distractiontype: 'manual' });
     setTimerSec(duration);
     setStatus('running');
     setDistractionCount(0);
+    setDistractionType('manual');
     setShowBreakSuggestion(false);
     setTaskName('');
     setTaskMinutes(25);
   };
 
   const endTask = async (result) => {
-    setStatus(result === 'success' ? 'finished' : 'stopped');
     if (!activeTask) return;
+    if (isSavingRef.current) return; // prevent duplicate submissions
+    isSavingRef.current = true;
+
+    setStatus(result === 'success' ? 'finished' : 'stopped');
 
     const payload = {
       name: activeTask.name,
@@ -230,35 +263,39 @@ export default function App() {
       status: result,
       category: activeTask.category || 'General',
       distractioncount: distractionCount,
+      distractiontype: activeTask.distractiontype || distractionType,
       completedAt: new Date().toISOString(),
       userEmail: user?.email,
     };
-
     try {
-      await fetch('/api/tasks', {
+      const res = await fetch('/api/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      
-      // Update cache
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+
       const newTask = { ...payload, id: Date.now() };
       const updated = [...tasks, newTask];
       setTasks(updated);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      
+
+      // Clear fetch errors to allow retries after successful save
+      setFetchErrors({});
+
       await fetchTasks();
       await fetchStats();
       await fetchWeeklyStats();
       await fetchHeatmapData();
     } catch (error) {
       console.error('Error saving task:', error);
-      // Queue for sync
       const queue = JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY) || '[]');
       queue.push({ method: 'POST', body: payload });
       localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
+    } finally {
+      isSavingRef.current = false;
+      setActiveTask(null);
     }
-    setActiveTask(null);
   };
 
   const pauseOrResume = () => {
@@ -273,11 +310,16 @@ export default function App() {
   const stopTask = () => {
     window.clearInterval(intervalRef.current);
     setTimerSec(0);
+    // ensure stop triggers endTask once; endTask itself guards duplicate submits
     endTask('stopped');
   };
 
   const recordDistraction = () => {
     setDistractionCount(prev => prev + 1);
+    // Update the active task's distraction type
+    if (activeTask) {
+      setActiveTask(prev => ({ ...prev, distractiontype: distractionType }));
+    }
   };
 
   const progress = useMemo(() => {
@@ -347,20 +389,20 @@ export default function App() {
       </div>
 
       {user && (
-        <div style={{ display: 'flex', gap: '10px', padding: '10px 20px', borderBottom: '1px solid #eee' }}>
+        <div style={{ display: 'flex', gap: '10px', padding: '10px 20px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
           <button 
             onClick={() => setViewMode('dashboard')} 
-            style={{ padding: '8px 16px', background: viewMode === 'dashboard' ? '#6ac47f' : '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+            style={{ padding: '8px 16px', background: viewMode === 'dashboard' ? '#6ac47f' : 'rgba(255,255,255,0.08)', border: 'none', borderRadius: '4px', cursor: 'pointer', color: '#f5f7ff' }}>
             📊 Dashboard
           </button>
           <button 
             onClick={() => setViewMode('weekly')} 
-            style={{ padding: '8px 16px', background: viewMode === 'weekly' ? '#6ac47f' : '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+            style={{ padding: '8px 16px', background: viewMode === 'weekly' ? '#6ac47f' : 'rgba(255,255,255,0.08)', border: 'none', borderRadius: '4px', cursor: 'pointer', color: '#f5f7ff' }}>
             📈 Weekly
           </button>
           <button 
             onClick={() => setViewMode('heatmap')} 
-            style={{ padding: '8px 16px', background: viewMode === 'heatmap' ? '#6ac47f' : '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+            style={{ padding: '8px 16px', background: viewMode === 'heatmap' ? '#6ac47f' : 'rgba(255,255,255,0.08)', border: 'none', borderRadius: '4px', cursor: 'pointer', color: '#f5f7ff' }}>
             🔥 Heatmap
           </button>
         </div>
@@ -429,6 +471,16 @@ export default function App() {
                 </div>
                 <div className="control-row" style={{ marginTop: '20px', gap: '8px' }}>
                   <button onClick={pauseOrResume} disabled={!activeTask} style={{ flex: 1 }}>{status === 'paused' ? 'Resume' : 'Pause'}</button>
+                  <select 
+                    value={distractionType} 
+                    onChange={(e) => setDistractionType(e.target.value)}
+                    style={{ padding: '8px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.08)', color: '#f5f7ff', fontSize: '12px' }}>
+                    <option value="manual">Manual</option>
+                    <option value="phone">Phone</option>
+                    <option value="social">Social Media</option>
+                    <option value="colleague">Colleague</option>
+                    <option value="other">Other</option>
+                  </select>
                   <button className="small-button" onClick={recordDistraction} disabled={!activeTask} style={{ padding: '8px 12px' }}>😵 +1 Dist</button>
                   <button className="small-button" onClick={stopTask} disabled={!activeTask}>Stop</button>
                 </div>
@@ -451,16 +503,18 @@ export default function App() {
               <div style={{ fontSize: '14px', opacity: 0.7 }}>Focus Score</div>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px', marginBottom: '16px' }}>
-              <div style={{ background: '#f5f5f5', padding: '12px', borderRadius: '8px' }}>
-                <div style={{ fontSize: '18px', fontWeight: 'bold' }}>🔥 {stats.streak || 0}</div>
-                <div style={{ fontSize: '12px', opacity: 0.7 }}>Day Streak</div>
+              <div style={{ background: 'rgba(106, 196, 127, 0.1)', border: '1px solid rgba(106, 196, 127, 0.2)', padding: '12px', borderRadius: '8px' }}>
+                <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#6ac47f' }}>🔥 {stats.streak || 0}</div>
+                <div style={{ fontSize: '12px', opacity: 0.7, color: '#f5f7ff' }}>Day Streak</div>
               </div>
-              <div style={{ background: '#f5f5f5', padding: '12px', borderRadius: '8px' }}>
-                <div style={{ fontSize: '18px', fontWeight: 'bold' }}>{stats.focusTimeMinutes || 0}m</div>
-                <div style={{ fontSize: '12px', opacity: 0.7 }}>Total Focus</div>
+              <div style={{ background: 'rgba(86, 103, 255, 0.1)', border: '1px solid rgba(86, 103, 255, 0.2)', padding: '12px', borderRadius: '8px' }}>
+                <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#5667ff' }}>{stats.focusTimeMinutes || 0}m</div>
+                <div style={{ fontSize: '12px', opacity: 0.7, color: '#f5f7ff' }}>Total Focus</div>
               </div>
             </div>
-            <Bar data={chartData} options={{ responsive: true, plugins: { legend: { display: false } } }} />
+            <div style={{ height: '300px', marginBottom: '20px' }}>
+              <Bar data={chartData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }} />
+            </div>
             <div className="stats-row">
               <div className="stat-box">
                 <strong>{stats.success || 0}</strong>
@@ -501,9 +555,9 @@ export default function App() {
               <h2 className="section-title">Category Breakdown</h2>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '12px' }}>
                 {categoryStats.map(cat => (
-                  <div key={cat.name} style={{ background: '#f5f5f5', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '14px', fontWeight: 'bold' }}>{cat.name}</div>
-                    <div style={{ fontSize: '12px', opacity: 0.7 }}>{cat.success} / {cat.success + cat.stopped}</div>
+                  <div key={cat.name} style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#f5f7ff' }}>{cat.name}</div>
+                    <div style={{ fontSize: '12px', opacity: 0.7, color: '#9bb3ff' }}>{cat.success} / {cat.success + cat.stopped}</div>
                     <div style={{ fontSize: '12px', color: '#6ac47f', fontWeight: 'bold', marginTop: '4px' }}>{cat.focusScore}%</div>
                   </div>
                 ))}
@@ -518,35 +572,35 @@ export default function App() {
           <section className="card">
             <h2 className="section-title">Weekly Report</h2>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px', marginBottom: '16px' }}>
-              <div style={{ background: '#e8f5e9', padding: '12px', borderRadius: '8px' }}>
+              <div style={{ background: 'rgba(106, 196, 127, 0.1)', border: '1px solid rgba(106, 196, 127, 0.2)', padding: '12px', borderRadius: '8px' }}>
                 <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#6ac47f' }}>{weeklyStats.summary.totalTasks}</div>
-                <div style={{ fontSize: '12px', opacity: 0.8 }}>Total Tasks</div>
+                <div style={{ fontSize: '12px', opacity: 0.8, color: '#f5f7ff' }}>Total Tasks</div>
               </div>
-              <div style={{ background: '#e3f2fd', padding: '12px', borderRadius: '8px' }}>
+              <div style={{ background: 'rgba(33, 150, 243, 0.1)', border: '1px solid rgba(33, 150, 243, 0.2)', padding: '12px', borderRadius: '8px' }}>
                 <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#2196f3' }}>{weeklyStats.summary.focusScore}%</div>
-                <div style={{ fontSize: '12px', opacity: 0.8 }}>Success Rate</div>
+                <div style={{ fontSize: '12px', opacity: 0.8, color: '#f5f7ff' }}>Success Rate</div>
               </div>
-              <div style={{ background: '#fff3e0', padding: '12px', borderRadius: '8px' }}>
+              <div style={{ background: 'rgba(255, 152, 0, 0.1)', border: '1px solid rgba(255, 152, 0, 0.2)', padding: '12px', borderRadius: '8px' }}>
                 <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ff9800' }}>{weeklyStats.summary.totalFocusTimeMinutes}m</div>
-                <div style={{ fontSize: '12px', opacity: 0.8 }}>Focus Time</div>
+                <div style={{ fontSize: '12px', opacity: 0.8, color: '#f5f7ff' }}>Focus Time</div>
               </div>
-              <div style={{ background: '#f3e5f5', padding: '12px', borderRadius: '8px' }}>
+              <div style={{ background: 'rgba(156, 39, 176, 0.1)', border: '1px solid rgba(156, 39, 176, 0.2)', padding: '12px', borderRadius: '8px' }}>
                 <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#9c27b0' }}>{weeklyStats.summary.avgFocusScore}%</div>
-                <div style={{ fontSize: '12px', opacity: 0.8 }}>Avg Score</div>
+                <div style={{ fontSize: '12px', opacity: 0.8, color: '#f5f7ff' }}>Avg Score</div>
               </div>
             </div>
-            {weeklyChartData && <Line data={weeklyChartData} options={{ responsive: true, plugins: { legend: { display: false } } }} />}
+            {weeklyChartData && <div style={{ height: '300px', marginTop: '20px' }}><Line data={weeklyChartData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }} /></div>}
           </section>
 
           <section className="card">
             <h2 className="section-title">Daily Breakdown</h2>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: '12px' }}>
               {weeklyStats.daily.map(day => (
-                <div key={day.date} style={{ background: '#f5f5f5', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
-                  <div style={{ fontSize: '14px', fontWeight: 'bold' }}>{day.day}</div>
-                  <div style={{ fontSize: '12px', opacity: 0.7 }}>{day.date}</div>
-                  <div style={{ fontSize: '12px', margin: '8px 0 4px 0' }}>✅ {day.success}</div>
-                  <div style={{ fontSize: '12px', marginBottom: '4px' }}>❌ {day.stopped}</div>
+                <div key={day.date} style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
+                  <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#f5f7ff' }}>{day.day}</div>
+                  <div style={{ fontSize: '12px', opacity: 0.7, color: '#9bb3ff' }}>{day.date}</div>
+                  <div style={{ fontSize: '12px', margin: '8px 0 4px 0', color: '#6ac47f' }}>✅ {day.success}</div>
+                  <div style={{ fontSize: '12px', marginBottom: '4px', color: '#ff6b6b' }}>❌ {day.stopped}</div>
                   <div style={{ fontSize: '12px', color: '#6ac47f', fontWeight: 'bold' }}>{day.focusScore}%</div>
                 </div>
               ))}
@@ -592,10 +646,10 @@ export default function App() {
             <h3 style={{ marginBottom: '12px' }}>Hourly Success Rate</h3>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(60px, 1fr))', gap: '8px' }}>
               {heatmapData.hourly.filter((_, idx) => idx % 2 === 0).map(hour => (
-                <div key={hour.hour} style={{ background: '#f5f5f5', padding: '8px', borderRadius: '4px', textAlign: 'center', fontSize: '12px' }}>
-                  <div style={{ fontWeight: 'bold' }}>{hour.hour}:00</div>
+                <div key={hour.hour} style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', padding: '8px', borderRadius: '4px', textAlign: 'center', fontSize: '12px' }}>
+                  <div style={{ fontWeight: 'bold', color: '#f5f7ff' }}>{hour.hour}:00</div>
                   <div style={{ color: '#6ac47f', fontWeight: 'bold' }}>{hour.successRate}%</div>
-                  <div style={{ opacity: 0.7, fontSize: '11px' }}>{hour.taskCount} tasks</div>
+                  <div style={{ opacity: 0.7, fontSize: '11px', color: '#9bb3ff' }}>{hour.taskCount} tasks</div>
                 </div>
               ))}
             </div>
